@@ -1,91 +1,114 @@
-%{?_javapackages_macros:%_javapackages_macros}
+Name:		compress-lzf
+Version:	1.2.1
+Release:	1
+Summary:	LZF compression codec
+Group:		Development/Java
+License:	ASL 2.0
+URL:		https://github.com/ning/compress
+Source0:	https://github.com/ning/compress/archive/refs/tags/compress-lzf-%{version}.tar.gz#/compress-lzf-%{version}.tar.gz
 
-Name:          compress-lzf
-Version:       1.0.3
-Release:       7.1
-Summary:       Basic LZF codec, compatible with standard C LZF package
-Group:         Development/Java
-License:       ASL 2.0
-URL:           https://github.com/ning/compress
-Source0:       https://github.com/ning/compress/archive/%{name}-%{version}.tar.gz
-
-BuildRequires: maven-local
-BuildRequires: mvn(junit:junit)
-BuildRequires: mvn(org.apache.felix:maven-bundle-plugin)
-BuildRequires: mvn(org.apache.maven.plugins:maven-enforcer-plugin)
-BuildRequires: mvn(org.apache.maven.surefire:surefire-testng)
-BuildRequires: mvn(org.sonatype.oss:oss-parent:pom:)
-BuildRequires: mvn(org.testng:testng)
-
-BuildArch:     noarch
+BuildArch:	noarch
+Obsoletes:	%{name}-javadoc < %{version}
+BuildRequires:	mvn(com.fasterxml:oss-parent:pom::)
+# oss-parent pins the compiler plugin to this ASM jar.
+BuildRequires:	mvn(org.ow2.asm:asm)
+# Literal, so the first rpmbuild -bs records them before sysjar is installed.
+BuildRequires:	maven
+BuildRequires:	java-current-devel
+BuildSystem:	maven
+BuildOption(install):	--file-name compress-lzf
 
 %description
-Compression codec for LZF encoding for particularly encoding/decoding,
-with reasonable compression. Compressor is basic Lempel-Ziv codec,
-without Huffman (deflate/gzip) or statistical post-encoding. See
-"http://oldhome.schmorp.de/marc/liblzf.html" for more on
-original LZF package.
-
-%package javadoc
-Summary:       Javadoc for %{name}
-
-%description javadoc
-This package contains javadoc for %{name}.
+Compress-LZF is a Lempel-Ziv codec compatible with the C liblzf
+package, without Huffman or statistical post-encoding. 1.2.1 rejects
+malformed back references. 1.2.0 fixes the difference between the
+big-endian and little-endian Unsafe encoders. The fast path uses
+sun.misc.Unsafe. Tests are skipped. The OSGi bundle descriptor and
+the Java module descriptor are left out.
 
 %prep
-%setup -q -n compress-%{name}-%{version}
+%autosetup -n compress-compress-lzf-%{version}
+# packaging bundle needs the Felix plugin, which is not packaged.
+# The version of these plugins is only in oss-parent, so the rewrite
+# keeps the child declarations. Moditect is on the keep list and would
+# run during package. Test dependencies are JUnit 5 and Jazzer.
+# .mvn holds a prebuilt Maven wrapper jar.
+python - <<'PY'
+import shutil
+import xml.etree.ElementTree as ET
+from pathlib import Path
 
-find . -name "*.class" -print -delete
-find . -name "*.jar" -type f -print -delete
+ET.register_namespace("", "http://maven.apache.org/POM/4.0.0")
+ET.register_namespace("xsi", "http://www.w3.org/2001/XMLSchema-instance")
 
-%pom_remove_plugin :maven-source-plugin
-%pom_xpath_remove "pom:project/pom:build/pom:plugins/pom:plugin[pom:artifactId='maven-javadoc-plugin']/pom:executions"
+def local(tag):
+    return tag.rsplit("}", 1)[-1]
 
-%pom_add_dep junit:junit::test
+drop_plugins = {
+    "central-publishing-maven-plugin",
+    "maven-javadoc-plugin",
+    "maven-release-plugin",
+    "maven-bundle-plugin",
+    "moditect-maven-plugin",
+}
 
-%mvn_file : %{name}
-
-%build
-
-%mvn_build -- -Poffline-testing
-
-%install
-%mvn_install
+path = Path("pom.xml")
+tree = ET.parse(path)
+root = tree.getroot()
+packaging = None
+removed = []
+removed_deps = 0
+for parent in list(root.iter()):
+    for child in list(parent):
+        name = local(child.tag)
+        if name == "packaging" and (child.text or "").strip() == "bundle":
+            child.text = "jar"
+            packaging = "jar"
+        if name in {"dependencies", "dependencyManagement"} and local(parent.tag) == "project":
+            parent.remove(child)
+            removed_deps += 1
+            continue
+        if name != "plugin":
+            continue
+        artifact = ""
+        for item in child:
+            if local(item.tag) == "artifactId":
+                artifact = (item.text or "").strip()
+        if artifact in drop_plugins:
+            parent.remove(child)
+            removed.append(artifact)
+if packaging != "jar" or sorted(removed) != sorted(drop_plugins) or removed_deps != 2:
+    raise SystemExit(f"packaging={packaging} removed={removed} deps={removed_deps}")
+# Keep source and target. Adding release hides sun.misc.Unsafe.
+compiler = None
+for parent in root.iter():
+    for child in parent:
+        if local(child.tag) != "plugin":
+            continue
+        artifact = ""
+        for item in child:
+            if local(item.tag) == "artifactId":
+                artifact = (item.text or "").strip()
+        if artifact == "maven-compiler-plugin":
+            compiler = child
+if compiler is None:
+    raise SystemExit("compiler plugin missing")
+source = target = None
+for item in compiler.iter():
+    if local(item.tag) == "source":
+        source = (item.text or "").strip()
+    if local(item.tag) == "target":
+        target = (item.text or "").strip()
+    if local(item.tag) == "release":
+        raise SystemExit("compiler release was added")
+if source != "1.8" or target != "1.8":
+    raise SystemExit(f"compiler source={source} target={target}")
+tree.write(path, encoding="UTF-8", xml_declaration=True)
+wrapper = Path(".mvn")
+if not (wrapper / "wrapper" / "maven-wrapper.jar").is_file():
+    raise SystemExit("maven wrapper jar missing")
+shutil.rmtree(wrapper)
+PY
 
 %files -f .mfiles
-%doc README.md VERSION.txt
-%doc LICENSE
-
-%files javadoc -f .mfiles-javadoc
-%doc LICENSE
-
-%changelog
-* Wed Jul 26 2017 Fedora Release Engineering <releng@fedoraproject.org> - 1.0.3-7
-- Rebuilt for https://fedoraproject.org/wiki/Fedora_27_Mass_Rebuild
-
-* Fri Feb 10 2017 Fedora Release Engineering <releng@fedoraproject.org> - 1.0.3-6
-- Rebuilt for https://fedoraproject.org/wiki/Fedora_26_Mass_Rebuild
-
-* Tue Jun 21 2016 gil cattaneo <puntogil@libero.it> 1.0.3-5
-- add missing build requires
-
-* Wed Feb 03 2016 Fedora Release Engineering <releng@fedoraproject.org> - 1.0.3-4
-- Rebuilt for https://fedoraproject.org/wiki/Fedora_24_Mass_Rebuild
-
-* Wed Jun 17 2015 Fedora Release Engineering <rel-eng@lists.fedoraproject.org> - 1.0.3-3
-- Rebuilt for https://fedoraproject.org/wiki/Fedora_23_Mass_Rebuild
-
-* Fri Jan 30 2015 gil cattaneo <puntogil@libero.it> 1.0.3-2
-- introduce license macro
-
-* Mon Nov 03 2014 gil cattaneo <puntogil@libero.it> 1.0.3-1
-- update to 1.0.3
-
-* Wed Jul 02 2014 gil cattaneo <puntogil@libero.it> 0.9.8-3
-- fix SUID issue in LZF compression rhbz#1115264
-
-* Sat Jun 07 2014 Fedora Release Engineering <rel-eng@lists.fedoraproject.org> - 0.9.8-2
-- Rebuilt for https://fedoraproject.org/wiki/Fedora_21_Mass_Rebuild
-
-* Wed Aug 14 2013 gil cattaneo <puntogil@libero.it> 0.9.8-1
-- initial rpm
+%doc LICENSE README.md VERSION.txt
